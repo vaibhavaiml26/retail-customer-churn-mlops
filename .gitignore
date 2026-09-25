@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.venv-ci/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Local datasets
+*.csv
+*.parquet
+*.xlsx
+
+# Models
+*.joblib
+*.pkl
+
+# Archives / generated artifacts
+*.zip
+
+# Local output folders
+predictions/
+model_registry/
+monitoring_history/
+performance_history/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Azure/local temporary files
+.azure/

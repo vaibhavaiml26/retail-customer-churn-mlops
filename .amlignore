@@ -1,0 +1,36 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+.vscode/
+.git/
+
+data/
+predictions/
+monitoring/
+models/registry/
+
+*.pyc
+venv/
+
+# Local/raw data is supplied as Azure ML Data Assets
+*.csv
+*.xlsx
+*.parquet
+data/
+
+# Generated artifacts should not be uploaded as source code
+predictions/
+monitoring/
+models/registry/
+outputs/
+logs/
+
+# Large packaged/reference artifacts
+*.zip
+*.tar
+*.gz
+*.pdf
+*.docx
+*.ipynb

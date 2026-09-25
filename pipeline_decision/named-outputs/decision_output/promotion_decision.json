@@ -1,0 +1,10 @@
+{
+  "stage": "azure_quarterly_retrain",
+  "retrain_skipped": true,
+  "promote": false,
+  "reason": "No new fully resolved snapshot beyond the current champion: available=5, champion_latest_snapshot=5.",
+  "as_of_date": "2011-10-01",
+  "champion_model_ref": "azureml:retail-churn-xgboost:2",
+  "available_snapshots": 5,
+  "champion_latest_snapshot": 5
+}

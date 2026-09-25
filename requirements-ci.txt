@@ -1,0 +1,9 @@
+pandas==2.3.0
+numpy==1.26.4
+scikit-learn==1.7.2
+xgboost==3.2.0
+joblib==1.5.1
+pyarrow==20.0.0
+pytest>=8,<9
+azure-ai-ml
+azure-identity
