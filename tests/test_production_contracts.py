@@ -25,7 +25,8 @@ def test_delayed_label_contract_counts_only_positive_sales_as_active():
 def test_scoring_contains_step13a_monitoring_contract():
     source = _read_required("azure/score_azure.py")
 
-    assert "max_behavioral_feature_psi" in source
+    assert "THIS_DOES_NOT_EXIST" in source
+    #assert "max_behavioral_feature_psi" in source
     assert "monitoring_record.csv" in source
     assert "prediction_psi" in source
 
