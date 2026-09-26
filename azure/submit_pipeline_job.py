@@ -45,7 +45,7 @@ REGISTERED_MODEL_NAME = "retail-churn-xgboost"
 # ------------------------------------------------------------------
 # Replay / scheduling controls
 # ------------------------------------------------------------------
-AS_OF_DATE = "2011-10-01"
+AS_OF_DATE = "2011-06-01"
 N_TRAIN = 2
 N_VAL = 1
 N_TEST = 1
