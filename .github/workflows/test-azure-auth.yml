@@ -25,3 +25,15 @@ jobs:
           az account show \
             --query "{subscription:name, tenant:tenantId}" \
             -o table
+
+      - name: Install Azure ML CLI extension
+        run: |
+          az extension add --name ml
+
+      - name: Verify Azure ML workspace access
+        run: |
+          az ml workspace show \
+            --name Customer_Churn \
+            --resource-group AI_ML \
+            --query "{name:name,location:location}" \
+            -o table
