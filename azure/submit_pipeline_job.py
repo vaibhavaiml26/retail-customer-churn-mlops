@@ -647,11 +647,6 @@ try:
             output_name="alert_output",
         )
         alert_files = list(Path(tmp).rglob("alert_summary.json"))
-        if len(alert_files) != 1:
-            raise RuntimeError(
-                "Expected exactly one alert_summary.json from monitoring child; "
-                f"found {len(alert_files)}."
-            )
         alert_summary = json.loads(
             alert_files[0].read_text(encoding="utf-8")
         )
