@@ -23,6 +23,10 @@ from azure.ai.ml.constants import AssetTypes
 from azure.ai.ml.entities import Model
 from azure.identity import DefaultAzureCredential
 
+import os
+import uuid
+from datetime import datetime, timezone
+
 # ------------------------------------------------------------------
 # Workspace settings
 # ------------------------------------------------------------------
@@ -45,7 +49,7 @@ REGISTERED_MODEL_NAME = "retail-churn-xgboost"
 # ------------------------------------------------------------------
 # Replay / scheduling controls
 # ------------------------------------------------------------------
-AS_OF_DATE = "2011-06-01"
+
 N_TRAIN = 2
 N_VAL = 1
 N_TEST = 1
@@ -54,6 +58,54 @@ STEP_MONTHS = 3
 OUTCOME_MONTHS = 3
 FIRST_PREDICTION_SNAPSHOT = "2011-06-01"
 
+AS_OF_DATE = os.getenv(
+    "AS_OF_DATE",
+    "2011-12-01"
+)
+
+EXECUTION_ID = os.getenv("EXECUTION_ID")
+
+
+if not EXECUTION_ID:
+    EXECUTION_ID = (
+        datetime.now(timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
+
+print("AS_OF_DATE:", AS_OF_DATE)
+print("EXECUTION_ID:", EXECUTION_ID)
+
+
+EXECUTION_MODE = os.getenv(
+    "EXECUTION_MODE",
+    "full"
+)
+VALID_MODES = {
+    "score_only",
+    "score_and_monitor",
+    "full",
+}
+
+if EXECUTION_MODE not in VALID_MODES:
+    raise ValueError(
+        f"Invalid EXECUTION_MODE: {EXECUTION_MODE}"
+    )
+ENABLE_DELAYED_EVAL = (
+    EXECUTION_MODE
+    in {"score_and_monitor", "full"}
+)
+
+ENABLE_MONITORING = (
+    EXECUTION_MODE
+    in {"score_and_monitor", "full"}
+)
+
+ENABLE_RETRAIN = (
+    EXECUTION_MODE == "full"
+)
 # Retraining cadence for the historical replay. The first real retraining
 # point is 2011-09-01 and then every 3 months.
 RETRAIN_ANCHOR_DATE = "2011-09-01"
@@ -481,9 +533,24 @@ pipeline_job.experiment_name = "retail-churn-production-pipeline"
 
 # Persist score outputs into prediction history so later pipeline runs can
 # evaluate delayed performance without hardcoding prior Azure job names.
-prediction_history_path = f"{PREDICTION_HISTORY_ROOT.rstrip('/')}/{AS_OF_DATE}"
-performance_history_path = f"{PERFORMANCE_HISTORY_ROOT.rstrip('/')}/{AS_OF_DATE}"
-alert_history_path = f"{ALERT_HISTORY_ROOT.rstrip('/')}/{AS_OF_DATE}"
+prediction_history_path=(
+    f"{PREDICTION_HISTORY_ROOT.rstrip('/')}/"
+    f"{AS_OF_DATE}/"
+    f"{EXECUTION_ID}"
+)
+performance_history_path =(
+    f"{PERFORMANCE_HISTORY_ROOT.rstrip('/')}/"
+    f"{AS_OF_DATE}/"
+    f"{EXECUTION_ID}"
+)
+alert_history_path=(
+    f"{ALERT_HISTORY_ROOT.rstrip('/')}/"
+    f"{AS_OF_DATE}/"
+    f"{EXECUTION_ID}"
+                  )
+#prediction_history_path = f"{PREDICTION_HISTORY_ROOT.rstrip('/')}/{AS_OF_DATE}"
+#performance_history_path = f"{PERFORMANCE_HISTORY_ROOT.rstrip('/')}/{AS_OF_DATE}"
+#alert_history_path = f"{ALERT_HISTORY_ROOT.rstrip('/')}/{AS_OF_DATE}"
 
 # The score/delayed-evaluation/alert child outputs are promoted to pipeline-level
 # outputs by the pipeline return dictionary above. Pin the *pipeline-level*

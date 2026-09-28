@@ -2,6 +2,28 @@ name: Deploy Azure ML Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+
+      as_of_date:
+        description: "Snapshot date YYYY-MM-DD"
+        required: true
+        type: string
+
+      execution_mode:
+        description: "What should this run do?"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - score_only
+          - score_and_monitor
+          - full
+
+      run_tests:
+        description: "Run pytest before Azure submission"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -43,8 +65,23 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Create execution ID
+        shell: bash
+        run: |
+          EXECUTION_ID="$(date -u +'%Y%m%dT%H%M%SZ')-github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "EXECUTION_ID=$EXECUTION_ID" >> "$GITHUB_ENV"
+          echo "Execution ID: $EXECUTION_ID"
+
       - name: Submit Azure ML production pipeline
         env:
+
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          AS_OF_DATE: ${{ inputs.as_of_date }}
+
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+
+          EXECUTION_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
+
         run: |
           python azure/submit_pipeline_job.py

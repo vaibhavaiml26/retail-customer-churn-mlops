@@ -120,42 +120,54 @@ def _resolve_prediction_file(
     predictions_data: str,
     evaluation_snapshot: pd.Timestamp,
 ) -> Path | None:
-    """Find the unique predictions_YYYY-MM-DD.parquet file, or return None.
-
-    Returning None lets the pipeline skip gracefully when a mature prediction
-    snapshot is expected conceptually, but the corresponding scoring output has
-    not yet been persisted into prediction history.
+    def _resolve_prediction_file(
+    predictions_data: str,
+    evaluation_snapshot: pd.Timestamp,
+) -> Path | None:
     """
-    root = Path(predictions_data)
+    Find the latest predictions_YYYY-MM-DD.parquet file for the
+    requested prediction snapshot.
 
-    if not root.exists():
-        raise FileNotFoundError(
-            f"Predictions input path does not exist: {root}"
+    Multiple files may exist because the same snapshot can be rerun.
+    Prediction history is expected to use execution folders whose names
+    begin with a UTC timestamp, for example:
+
+        prediction-history/
+        └── 2011-06-01/
+            ├── 20260927T120000Z-local-a1b2c3d4/
+            │   └── predictions_2011-06-01.parquet
+            └── 20260928T090000Z-github-123456789-1/
+                └── predictions_2011-06-01.parquet
+
+    The latest execution folder is selected.
+
+    Return None when no persisted prediction exists for the requested
+    snapshot so delayed evaluation can skip gracefully.
+    """
+
+    snapshot_str = pd.Timestamp(
+        evaluation_snapshot
+    ).strftime("%Y-%m-%d")
+
+    prediction_files = list(
+        Path(predictions_data).rglob(
+            f"predictions_{snapshot_str}.parquet"
         )
-
-    expected_name = (
-        f"predictions_{evaluation_snapshot.strftime('%Y-%m-%d')}.parquet"
     )
 
-    if root.is_file():
-        candidates = [root] if root.name == expected_name else []
-    else:
-        candidates = [
-            file
-            for file in root.rglob(expected_name)
-            if file.is_file()
-        ]
-
-    if len(candidates) == 0:
+    if not prediction_files:
         return None
 
-    if len(candidates) != 1:
-        raise ValueError(
-            f"Expected exactly one {expected_name!r} under {root}; "
-            f"found {len(candidates)}: {candidates}"
-        )
+    prediction_file = sorted(
+        prediction_files,
+        key=lambda p: p.parent.name,
+    )[-1]
 
-    return candidates[0]
+    return prediction_file
+
+
+
+    return prediction_file
 
 
 def _single_value_or_none(series: pd.Series):
@@ -291,6 +303,7 @@ def main(
         )
 
     predictions = pd.read_parquet(prediction_file)
+    prediction_execution_id = prediction_file.parent.name
 
     missing = sorted(REQUIRED_PREDICTION_COLUMNS - set(predictions.columns))
     if missing:
@@ -478,6 +491,7 @@ def main(
         "evaluation_skipped": False,
         "azure_run_id": os.getenv("AZUREML_RUN_ID"),
         "scoring_run_id": scoring_run_id,
+        "prediction_execution_id": prediction_execution_id,
         "as_of_date": as_of_ts.date().isoformat(),
         "prediction_snapshot": evaluation_snapshot.date().isoformat(),
         "outcome_start": evaluation_snapshot.date().isoformat(),
