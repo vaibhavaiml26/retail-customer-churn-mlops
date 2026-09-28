@@ -120,29 +120,25 @@ def _resolve_prediction_file(
     predictions_data: str,
     evaluation_snapshot: pd.Timestamp,
 ) -> Path | None:
-    def _resolve_prediction_file(
-    predictions_data: str,
-    evaluation_snapshot: pd.Timestamp,
-) -> Path | None:
     """
-    Find the latest predictions_YYYY-MM-DD.parquet file for the
-    requested prediction snapshot.
+        Find the latest predictions_YYYY-MM-DD.parquet file for the
+        requested prediction snapshot.
 
-    Multiple files may exist because the same snapshot can be rerun.
-    Prediction history is expected to use execution folders whose names
-    begin with a UTC timestamp, for example:
+        Multiple files may exist because the same snapshot can be rerun.
+        Prediction history is expected to use execution folders whose names
+        begin with a UTC timestamp, for example:
 
-        prediction-history/
-        └── 2011-06-01/
-            ├── 20260927T120000Z-local-a1b2c3d4/
-            │   └── predictions_2011-06-01.parquet
-            └── 20260928T090000Z-github-123456789-1/
-                └── predictions_2011-06-01.parquet
+            prediction-history/
+            └── 2011-06-01/
+                ├── 20260927T120000Z-local-a1b2c3d4/
+                │   └── predictions_2011-06-01.parquet
+                └── 20260928T090000Z-github-123456789-1/
+                    └── predictions_2011-06-01.parquet
 
-    The latest execution folder is selected.
+        The latest execution folder is selected.
 
-    Return None when no persisted prediction exists for the requested
-    snapshot so delayed evaluation can skip gracefully.
+        Return None when no persisted prediction exists for the requested
+        snapshot so delayed evaluation can skip gracefully.
     """
 
     snapshot_str = pd.Timestamp(
@@ -162,10 +158,6 @@ def _resolve_prediction_file(
         prediction_files,
         key=lambda p: p.parent.name,
     )[-1]
-
-    return prediction_file
-
-
 
     return prediction_file
 
