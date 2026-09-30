@@ -1,179 +1,573 @@
-# Retail Customer Churn — Local Production Pipeline
+# Retail Customer Churn Prediction & MLOps
 
-This is the corrected local-production version of the uploaded project. It keeps the validated modelling design: a **5-month feature window**, **3-month churn outcome**, **3-month labeled-snapshot spacing**, monthly scoring, and XGBoost/Random Forest champion-challenger retraining.
+## Project Overview
 
-## What was corrected
+This project builds an end-to-end **customer churn prediction and MLOps system** for a grocery retailer using almost two years of historical transaction data.
 
-1. **Churn label:** only a future positive-quantity sale counts as renewed activity. A return alone does not make a customer active.
-2. **Rolling retraining:** the split now moves forward, e.g. `1,2,3 | 4,5 | 6` then `2,3,4 | 5,6 | 7`.
-3. **Snapshot readiness:** retraining checks the champion's `latest_snapshot_used`; it does not repeatedly retrain the same data.
-4. **Champion comparison:** the deployed champion is evaluated frozen. It is never re-fitted just to compare against a challenger.
-5. **XGBoost tuning:** `tune_xgboost` is implemented.
-6. **Temporal CV:** hyperparameter CV uses forward-chaining snapshot folds when snapshot IDs are supplied.
-7. **Retrain vs retune:** quarterly retraining uses the validated frozen parameters by default. Set `RETUNE_ON_RETRAIN=True` only when deliberately retuning.
-8. **Curated layer:** cleaning happens before data enters the curated store.
-9. **Idempotent ingestion:** SHA-256 + JSONL manifest prevents the exact monthly batch from being appended twice.
-10. **Immutable raw archive:** every monthly source file is copied under `data/raw/YYYY-MM/` before curation.
-11. **Explicit scoring cutoff:** monthly scoring requires `--snapshot-date`; it never infers the business cutoff from the last transaction timestamp.
-12. **Delayed labels:** resolved outcomes are stored by `(CustomerID, snapshot_date)`.
-13. **Monitoring:** feature PSI, prediction PSI, predicted churn rate, delayed ROC-AUC/PR-AUC/precision/recall/F1 are persisted.
-14. **Registry lineage:** model version metadata contains feature schema, split snapshot IDs, environment versions, threshold, parameters, and latest labeled snapshot used.
+The source data was transactional, containing invoices, purchased items, quantities, prices, returns, customer identifiers, and transaction dates. The business objective, however, was customer-centric:
 
-## Folder structure
+> Given a customer's historical purchasing behaviour, estimate the probability that the customer will become inactive over the following three months.
 
-```text
-retail_churn_production/
-├── config.py
-├── data_loader.py
-├── data_validation.py
-├── feature_engineering.py
-├── dataset_builder.py
-├── models.py
-├── ingestion_manifest.py
-├── pipeline_common.py
-├── label_resolution.py
-├── drift_monitoring.py
-├── model_registry.py
-├── score_monthly.py
-├── retrain_quarterly.py
-├── bootstrap_local.py
-├── main.py
-├── requirements.txt
-├── tests/
-├── data/
-│   ├── raw/
-│   ├── curated/
-│   ├── manifests/
-│   └── labels/
-├── predictions/
-├── monitoring/
-└── models/registry/
-```
+The project therefore required more than training a classification algorithm. Key challenges included defining churn for a non-subscription retail business, converting transaction-level data into customer-level behavioural features, designing leakage-free temporal snapshots, selecting an operating threshold, enabling monthly batch scoring, evaluating predictions only after outcomes matured, monitoring drift and performance, and implementing controlled champion-challenger retraining.
 
-## 1. Create the local environment
+The final system supports:
 
-Windows example:
+- Customer-level feature engineering from raw retail transactions
+- Temporal training snapshots with forward-looking churn labels
+- Out-of-time validation and testing
+- Random Forest and XGBoost model evaluation
+- Validation-based threshold selection using Youden J
+- Azure Machine Learning training, compute, storage, pipelines, and model registry
+- Monthly batch scoring
+- Persistent prediction history
+- Delayed ground-truth performance evaluation
+- Feature and prediction drift monitoring
+- Champion-challenger retraining and promotion guardrails
+- GitHub CI/CD with automated tests and OIDC-based Azure authentication
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-python -m pip install -r requirements.txt
-```
+---
 
-Run tests:
+## 1. Defining Customer Churn
 
-```bash
-pytest
-```
+The first challenge was defining **churn** in a grocery-retail environment.
 
-## 2. Bootstrap the historical model once
+Unlike a subscription business, there is no explicit cancellation event. A customer usually does not declare that they have churned. Churn therefore had to be inferred from purchasing behaviour.
 
-Place the two historical CSVs somewhere accessible, then:
+Historical transaction patterns were analysed to identify an inactivity period that could be used as a meaningful churn definition. The final target was based on a **three-month forward outcome window**.
 
-```bash
-python bootstrap_local.py --files online_retail_II_2009_10.csv online_retail_II_2010_11.csv
-```
-
-This creates the curated history and trains/registers the first champion using the newest fully resolved rolling snapshot window available in the historical data.
-
-## 3. Score one completed month
-
-If `transactions_2027_09.csv` contains **September 2027 only**, use an exclusive snapshot date of October 1:
-
-```bash
-python score_monthly.py --new-file transactions_2027_09.csv --snapshot-date 2027-10-01
-```
-
-The snapshot date means **data is complete up to, but not including, this date**. Features therefore use the five months ending at `2027-10-01`.
-
-The monthly job:
+For a prediction snapshot at time `T`:
 
 ```text
-archive raw file
-→ checksum/idempotency check
-→ structural validation
-→ clean
-→ volume anomaly check
-→ append curated history
-→ build current features
-→ load CURRENT champion
-→ score official customers
-→ score PREVIOUS champion silently as shadow (when available)
-→ persist official + shadow predictions
-→ behavioral + expected-temporal feature drift
-→ prediction drift
-→ resolve old official/shadow cohorts whose 3-month outcome just matured
-→ calibration + delayed model metrics
-→ persist monitoring/run logs
+Historical customer behaviour
+          |
+          v
+          T
+          |
+          +-------- Next 3 months --------+
+          |                               |
+          |      Any positive sale?       |
+          |                               |
+          +-- Yes -> Active = 0           |
+          |                               |
+          +-- No  -> Churned = 1          |
 ```
 
-## 4. Run the retraining job
+Only positive-quantity sale activity is considered when determining whether a customer remains active. Returns or cancellation transactions by themselves do not make a customer active.
 
-Schedule this monthly or quarterly. Running it too often is safe because it checks whether a genuinely new labeled snapshot exists:
-
-```bash
-python retrain_quarterly.py
-```
-
-For the historical production replay the configured `2/1/1` split rolls like this:
+Conceptually:
 
 ```text
-latest=4: train [1,2] | val [3] | test [4]
-latest=5: train [2,3] | val [4] | test [5]
-latest=6: train [3,4] | val [5] | test [6]
+Customer makes >= 1 valid sale in next 3 months
+        -> inactive_90d = 0
+
+Customer makes no valid sale in next 3 months
+        -> inactive_90d = 1
 ```
 
-For the richer model-development experiment, restore `3/2/1` in `config.py`.
+This converts an otherwise ambiguous business concept into a reproducible supervised-learning target.
 
-The challenger is fit on the rolling training snapshots. Its threshold is selected on current validation data. The **frozen current champion** and challenger are then evaluated on the same validation set. Promotion uses ROC-AUC as the primary metric plus recall and Brier-score guardrails configured in `config.py`. The held-out test remains outside the promotion decision. When a challenger is promoted, the replaced champion becomes `PREVIOUS` and is available for shadow scoring.
+---
 
-## 5. Retraining is not retuning
+## 2. Converting Transaction Data into Customer Features
 
-Default:
+The second major challenge was the mismatch between the available data and the required prediction unit.
 
-```python
-RETUNE_ON_RETRAIN = False
+The retailer supplied **transaction-level data**, while the model needed to predict churn at the **customer level**.
+
+Raw data looked conceptually like:
+
+```text
+Customer | Invoice | Date | Item | Quantity | Price
+---------------------------------------------------
+C001     | I101    | Jan  | A    | 2        | ...
+C001     | I101    | Jan  | B    | 1        | ...
+C001     | I205    | Feb  | C    | 3        | ...
+C002     | I310    | Feb  | A    | 1        | ...
 ```
 
-Quarterly candidates use the already validated model parameters. This is cheap and stable. To deliberately rerun GridSearchCV during a retrain cycle:
+The model instead required one customer feature record per snapshot:
 
-```python
-RETUNE_ON_RETRAIN = True
+```text
+Customer | Revenue | Transactions | Recency | Returns | Tenure | ...
+-------------------------------------------------------------------
+C001     | ...     | ...          | ...     | ...     | ...    |
+C002     | ...     | ...          | ...     | ...     | ...    |
 ```
 
-Both RF and XGBoost tuning use **forward-chaining temporal CV** when snapshot IDs are supplied.
+The final production feature set contains **14 customer behavioural features**:
 
-## 6. Local artifacts
+1. `total_sales_revenue`
+2. `total_items_purchased`
+3. `total_sale_txs`
+4. `avg_sale_days`
+5. `recency`
+6. `total_return_amount`
+7. `total_items_returned`
+8. `total_return_txs`
+9. `avg_return_days`
+10. `recent_revenue`
+11. `tenure_days`
+12. `recent_tx_count`
+13. `revenue_momentum`
+14. `tx_count_momentum`
 
-- `data/raw/YYYY-MM/` — exact delivered source files.
-- `data/manifests/ingested_files.jsonl` — checksum and ingestion audit trail.
-- `data/curated/all_transactions.parquet` — cleaned, deduplicated history.
-- `predictions/snapshot_YYYY-MM-DD__MODEL_VERSION.parquet` — official scored customer cohort.
-- `predictions/shadow/` — previous-champion shadow predictions.
-- `data/labels/customer_outcomes.parquet` — delayed ground truth.
-- `monitoring/monitoring_history.csv` — immediate drift/prediction statistics.
-- `monitoring/model_performance_history.csv` — delayed official/shadow production metrics.
-- `monitoring/calibration_history.csv` — probability-decile calibration history.
-- `monitoring/shadow_model_comparison_history.csv` — same-cohort official-vs-shadow comparison.
-- `monitoring/run_log.jsonl` — pipeline execution audit.
-- `models/registry/<model_type>/<version>/` — immutable model artifact + metadata + drift baselines.
-- `models/registry/<model_type>/CURRENT` — current champion pointer.
+These features capture purchasing value, transaction frequency, recency, returns, customer tenure, recent activity, and behavioural momentum.
 
-## 7. Scheduling locally
+---
 
-For the MVP, use Windows Task Scheduler or cron:
+## 3. Temporal Snapshot Design
 
-- **Monthly:** `score_monthly.py` after the completed monthly transaction extract arrives.
-- **Monthly:** `retrain_quarterly.py` after scoring. Its readiness check makes non-retrain months cheap no-ops.
+Temporal snapshot construction was one of the most important modelling decisions.
 
-The cloud phase can later replace local storage/scheduling/registry without changing the ML semantics.
+For each historical training example, the system separates:
 
-## Important remaining local limitations
+```text
+Feature Window
+      +
+Future Outcome Window
+```
 
-This is intentionally a local production-style MVP, not an imitation of a multinational bank's platform department.
+After experimentation and analysis, a **five-month feature window** was selected.
 
-- Alerts currently print to stderr; email/Teams/Slack is not wired.
-- Storage is local Parquet/JSONL/CSV, not a transactional warehouse.
-- There is no multi-process locking. Run one ingestion/retrain process at a time.
-- No secrets are needed yet.
-- No Docker/CI/CD is included yet; those are the next layer before cloud deployment.
+```text
+<--------- 5 months ---------><------ 3 months ------>
+       FEATURE WINDOW                 OUTCOME WINDOW
+
+Customer behaviour                    Was customer
+used to calculate                     active or inactive?
+14 features
+```
+
+The model receives only information available before the snapshot date and predicts what happens afterwards. This separation is critical to preventing future-data leakage.
+
+---
+
+## 4. Balancing Snapshot Overlap and Training Data
+
+Almost two years of transaction data becomes relatively limited once every observation requires both a five-month feature window and a three-month future outcome window.
+
+Creating snapshots too frequently would make adjacent training samples highly correlated. For example, monthly five-month windows would share four months of transaction history.
+
+On the other hand, spacing snapshots too far apart would reduce the already limited training data.
+
+The project therefore balanced:
+
+```text
+Reduce temporal overlap
+          ^
+          |
+          v
+Maximise available training data
+```
+
+Snapshots were spaced **three months apart**, which results in a **two-month overlap** between adjacent five-month feature windows.
+
+```text
+Snapshot 1
+[ M1 M2 M3 M4 M5 ]
+
+Snapshot 2
+         [ M4 M5 M6 M7 M8 ]
+
+Overlap
+         [ M4 M5 ]
+```
+
+This provided a practical compromise between sample independence and available training volume.
+
+---
+
+## 5. Training Observation Structure
+
+Each historical training snapshot consists of:
+
+```text
+5-month customer feature window
+            +
+3-month future outcome window
+```
+
+A single modelling row is therefore conceptually:
+
+```text
+CustomerID
+SnapshotDate
+Feature1
+Feature2
+...
+Feature14
+inactive_90d
+```
+
+The natural observation key is:
+
+```text
+(CustomerID, SnapshotDate)
+```
+
+The same customer can appear in multiple snapshots because each snapshot represents the customer's state at a different point in time.
+
+---
+
+## 6. Temporal Training, Validation and Test Design
+
+Random train/test splitting was deliberately avoided because it can mix later customer behaviour into training while earlier periods appear in validation or testing.
+
+Instead, the data was split chronologically.
+
+For the rolling retraining framework, four consecutive resolved snapshots are used as:
+
+```text
+Snapshot N      -> Training
+Snapshot N+1    -> Training
+Snapshot N+2    -> Validation
+Snapshot N+3    -> Test
+```
+
+This produces a realistic out-of-time evaluation and better represents how the model behaves in production.
+
+The held-out test snapshot is evaluated only after the challenger has passed validation-based promotion checks.
+
+---
+
+## 7. Monthly Prediction Cadence
+
+Historical training snapshots are spaced three months apart to reduce overlap, but **production scoring occurs monthly**.
+
+At the completion of each month:
+
+```text
+Latest available transactions
+              |
+              v
+Build latest 5-month feature window
+              |
+              v
+Generate 14 customer features
+              |
+              v
+Load current champion model
+              |
+              v
+Generate churn probability
+              |
+              v
+Apply operating threshold
+              |
+              v
+Persist predictions
+```
+
+This allows the business to receive refreshed churn predictions every month even though training examples are spaced farther apart.
+
+---
+
+## 8. Prediction History and Delayed Ground Truth
+
+Model performance cannot be measured immediately because the churn target requires three months of future behaviour.
+
+Predictions are therefore persisted for later evaluation.
+
+```text
+June prediction
+      |
+      v
+Prediction history
+      |
+      | wait for outcome window
+      v
+September
+      |
+      v
+Actual Jun-Aug transaction activity
+      |
+      v
+Generate true churn labels
+      |
+      v
+Compare prediction vs actual
+```
+
+This leads to two forms of monitoring.
+
+### Immediate monitoring
+
+Available as soon as monthly scoring completes:
+
+- Feature drift
+- Prediction drift
+- Predicted churn rate
+- Probability distribution
+- Data-quality checks
+
+### Delayed performance monitoring
+
+Available once the three-month outcome period has matured:
+
+- ROC-AUC
+- PR-AUC
+- Precision
+- Recall
+- F1
+- Accuracy
+- Brier score
+- Confusion matrix
+- Actual vs predicted churn rate
+
+---
+
+## 9. Probability Threshold Selection
+
+The model produces a churn probability rather than a direct binary decision.
+
+```text
+Customer A -> P(churn) = 0.18
+Customer B -> P(churn) = 0.42
+Customer C -> P(churn) = 0.79
+```
+
+An operating threshold converts the probability into a classification:
+
+```text
+Probability >= threshold -> Predict churn
+Probability < threshold  -> Predict active
+```
+
+The threshold was selected using the **Youden J statistic** on validation data. Test data was not used for threshold tuning.
+
+The selected threshold is stored with the registered model metadata and reused during production scoring.
+
+---
+
+## 10. Model Evaluation and Promotion Metrics
+
+Multiple metrics are used because no single metric fully describes churn-model quality.
+
+### ROC-AUC
+Measures ranking ability across all decision thresholds.
+
+### Recall
+Measures the proportion of actual churners correctly identified.
+
+### F1 Score
+Balances precision and recall and is reported as an important classification metric.
+
+### PR-AUC
+Provides additional insight when class distributions are imbalanced.
+
+### Brier Score
+Measures the quality of the predicted probabilities themselves.
+
+For automated champion-challenger retraining, the promotion guardrails use:
+
+- ROC-AUC
+- Recall
+- Brier score
+
+A challenger is allowed only limited degradation against the current champion. If the challenger breaches the promotion guardrails, the existing champion remains deployed.
+
+---
+
+## 11. Champion-Challenger Retraining
+
+The system follows a **champion-challenger** retraining strategy.
+
+```text
+New resolved historical data
+          |
+          v
+Train challenger
+          |
+          v
+Evaluate on forward validation snapshot
+          |
+          v
+Compare against champion
+          |
+     +----+----+
+     |         |
+   Pass       Fail
+     |         |
+     v         v
+Evaluate     Reject
+on test      challenger
+     |
+     v
+Register new champion version
+```
+
+Retraining is scheduled only when an outcome window can mature, and the retraining component independently checks whether a genuinely new fully resolved snapshot exists before training another challenger.
+
+---
+
+## 12. CI/CD and MLOps Implementation
+
+Azure Machine Learning and GitHub are used together to provide the production MLOps foundation.
+
+### Azure Machine Learning
+
+Azure ML is used for:
+
+- Managed compute
+- Data and output storage
+- Model training
+- Pipeline orchestration
+- Model registry and versioning
+- Monthly batch scoring
+- Prediction and performance history
+- Monitoring outputs
+- Champion-challenger retraining
+
+### GitHub
+
+GitHub is used for:
+
+- Source-code management
+- Version control
+- Continuous Integration
+- Automated tests
+- Controlled Continuous Deployment
+- Azure authentication orchestration using OIDC
+
+The CI/CD flow is:
+
+```text
+Local Development
+      |
+      v
+Git Commit / Push
+      |
+      v
+GitHub Repository
+      |
+      v
+Continuous Integration
+      |
+      +-- Set up Python
+      +-- Install dependencies
+      +-- Compile Python code
+      +-- Run pytest
+      |
+      v
+Code validated
+      |
+      | manual deployment trigger
+      v
+GitHub CD Workflow
+      |
+      v
+GitHub OIDC Token
+      |
+      v
+Microsoft Entra ID
+      |
+      v
+Azure IAM / RBAC
+      |
+      v
+Azure Machine Learning
+      |
+      v
+Submit ML Pipeline
+```
+
+### Authentication and Authorization
+
+GitHub generates a short-lived OIDC token for the deployment workflow. Microsoft Entra ID validates the GitHub workload against a federated identity credential.
+
+This removes the need to store a long-lived Azure client secret in GitHub.
+
+The responsibilities are separated as follows:
+
+```text
+Microsoft Entra ID
+"Who are you?"
+        |
+        +-- Authentication
+
+Azure IAM / RBAC
+"What are you allowed to do?"
+        |
+        +-- Authorization
+```
+
+The GitHub deployment identity is granted only the Azure permissions required to submit and interact with Azure ML workloads.
+
+### Separation of CI and CD
+
+A normal code push can trigger CI tests, but it does **not** automatically run the Azure ML production pipeline.
+
+Actual Azure execution remains manually controlled using a GitHub Actions `workflow_dispatch` deployment workflow.
+
+This allows source-code changes to be validated without unnecessarily starting Azure compute, scoring, monitoring, or retraining jobs.
+
+---
+
+## 13. Reproducible Pipeline Executions
+
+Every Azure ML execution receives a unique execution identifier.
+
+Outputs are stored using both:
+
+```text
+Snapshot Date
++
+Execution ID
+```
+
+For example:
+
+```text
+prediction-history/
+└── 2011-09-01/
+    ├── execution-1/
+    │   └── predictions_2011-09-01.parquet
+    └── execution-2/
+        └── predictions_2011-09-01.parquet
+```
+
+The same partitioning concept is used for prediction, performance, and alert history.
+
+This supports auditability, safe reruns, debugging, lineage, and reproducibility without overwriting earlier results.
+
+---
+
+## 14. Technology Stack
+
+- **Python 3.11**
+- **pandas / NumPy**
+- **scikit-learn**
+- **XGBoost**
+- **Azure Machine Learning SDK v2**
+- **Azure ML Compute / Data Assets / Model Registry / Pipelines**
+- **Git / GitHub**
+- **GitHub Actions**
+- **pytest**
+- **Microsoft Entra ID**
+- **OIDC workload identity federation**
+- **Azure IAM / RBAC**
+
+---
+
+## 15. Key Design Principles
+
+The project was designed around the following principles:
+
+- Prevent future-data leakage in all temporal datasets
+- Evaluate models using out-of-time validation and test snapshots
+- Separate historical training cadence from monthly production scoring
+- Persist predictions so performance can be evaluated after outcomes mature
+- Monitor both data/prediction drift and delayed model performance
+- Separate retraining from hyperparameter retuning
+- Use champion-challenger governance instead of automatically replacing the production model
+- Keep CI separate from cloud deployment
+- Use secretless OIDC authentication between GitHub and Azure
+- Preserve immutable execution history for reproducibility and auditability
+
+---
+
+## Repository Notes
+
+This repository intentionally excludes secrets, Azure subscription identifiers, tenant identifiers, local machine paths, raw customer data, and generated model/output artifacts.
+
+Public examples and documentation describe the production design without exposing private infrastructure or source data.
